@@ -24,9 +24,10 @@
 
 #pragma hdrstop
 using namespace Microsoft::Console::Types;
-
+using Microsoft::Console::Interactivity::ServiceLocator;
+using Microsoft::Console::VirtualTerminal::StateMachine;
 // Used by WriteCharsLegacy.
-#define IS_GLYPH_CHAR(wch)   (((wch) < L' ') || ((wch) == 0x007F))
+#define IS_GLYPH_CHAR(wch) (((wch) < L' ') || ((wch) == 0x007F))
 
 // Routine Description:
 // - This routine updates the cursor position.  Its input is the non-special
@@ -39,11 +40,10 @@ using namespace Microsoft::Console::Types;
 // - coordCursor - New location of cursor.
 // - fKeepCursorVisible - TRUE if changing window origin desirable when hit right edge
 // Return Value:
-[[nodiscard]]
-NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
-                              _In_ COORD coordCursor,
-                              const BOOL fKeepCursorVisible,
-                              _Inout_opt_ PSHORT psScrollY)
+[[nodiscard]] NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
+                                            _In_ COORD coordCursor,
+                                            const BOOL fKeepCursorVisible,
+                                            _Inout_opt_ PSHORT psScrollY)
 {
     const COORD bufferSize = screenInfo.GetBufferSize().Dimensions();
     if (coordCursor.X < 0)
@@ -109,7 +109,7 @@ NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
         //  margin down, then move the viewport down.
 
         const SHORT delta = coordCursor.Y - srMargins.Bottom;
-        SMALL_RECT scrollRect{0};
+        SMALL_RECT scrollRect{ 0 };
         scrollRect.Left = 0;
         scrollRect.Top = srMargins.Bottom + 1; // One below margins
         scrollRect.Bottom = bufferSize.Y - 1; // -1, otherwise this would be an exclusive rect.
@@ -129,7 +129,7 @@ NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
         //      new rows at the bottom.
         // If we do this, then the viewport is now one line higher than it used
         //      to be, so it needs to move down by one less line.
-        for(auto i = 0; i < newRows; i++)
+        for (auto i = 0; i < newRows; i++)
         {
             screenInfo.GetTextBuffer().IncrementCircularBuffer();
             moveToYPosition--;
@@ -140,15 +140,11 @@ NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
         const COORD newPostMarginsOrigin = { 0, moveToYPosition };
         const COORD newViewOrigin = { 0, newViewTop };
 
-        // Unset the margins to scroll the content below the margins,
-        //      then restore them after.
-        screenInfo.SetScrollMargins(Viewport::FromInclusive({0}));
         try
         {
             ScrollRegion(screenInfo, scrollRect, std::nullopt, newPostMarginsOrigin, UNICODE_SPACE, bufferAttributes);
         }
         CATCH_LOG();
-        screenInfo.SetScrollMargins(relativeMargins);
 
         // Move the viewport down
         auto hr = screenInfo.SetViewportOrigin(true, newViewOrigin, true);
@@ -162,7 +158,7 @@ NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
         //      displays the correct text.
         if (newViewOrigin == viewport.Origin())
         {
-            Viewport invalid = Viewport::FromDimensions(viewport.Origin(), {viewport.Width(), delta});
+            Viewport invalid = Viewport::FromDimensions(viewport.Origin(), { viewport.Width(), delta });
             screenInfo.GetRenderTarget().TriggerRedraw(invalid);
         }
 
@@ -186,39 +182,19 @@ NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
         SMALL_RECT scrollRect = { 0 };
         scrollRect.Top = srMargins.Top;
         scrollRect.Bottom = srMargins.Bottom;
-        scrollRect.Left = screenInfo.GetViewport().Left();  // NOTE: Left/Right Scroll margins don't do anything currently.
-        scrollRect.Right = screenInfo.GetViewport().RightInclusive();
+        scrollRect.Left = 0; // NOTE: Left/Right Scroll margins don't do anything currently.
+        scrollRect.Right = bufferSize.X - 1; // -1, otherwise this would be an exclusive rect.
 
         COORD dest;
         dest.X = scrollRect.Left;
         dest.Y = scrollRect.Top - diff;
 
-        SMALL_RECT clipRect = scrollRect;
-        // Typically ScrollRegion() clips by the scroll margins. However, if
-        //      we're scrolling down at the top of the viewport, we'll need to
-        //      not clip at the margins, instead move the contents of the margins
-        //      up above the viewport. So we'll clear out the current margins, and
-        //      set them to the viewport+(#diff rows above the viewport).
-        if (scrollDownAtTop)
-        {
-            clipRect.Top -= diff;
-            auto fakeMargins = srMargins;
-            fakeMargins.Top -= diff;
-            auto fakeRelative = viewport.ConvertToOrigin(Viewport::FromInclusive(fakeMargins));
-            screenInfo.SetScrollMargins(fakeRelative);
-        }
-
         try
         {
-            ScrollRegion(screenInfo, scrollRect, clipRect, dest, UNICODE_SPACE, bufferAttributes);
+            ScrollRegion(screenInfo, scrollRect, scrollRect, dest, UNICODE_SPACE, bufferAttributes);
         }
         CATCH_LOG();
 
-        if (scrollDownAtTop)
-        {
-            // Undo the fake margins we set above
-            screenInfo.SetScrollMargins(relativeMargins);
-        }
         coordCursor.Y -= diff;
     }
 
@@ -299,16 +275,15 @@ NTSTATUS AdjustCursorPosition(SCREEN_INFORMATION& screenInfo,
 // Return Value:
 // Note:
 // - This routine does not process tabs and backspace properly.  That code will be implemented as part of the line editing services.
-[[nodiscard]]
-NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
-                          _In_range_(<= , pwchBuffer) const wchar_t* const pwchBufferBackupLimit,
-                          _In_ const wchar_t* pwchBuffer,
-                          _In_reads_bytes_(*pcb) const wchar_t* pwchRealUnicode,
-                          _Inout_ size_t* const pcb,
-                          _Out_opt_ size_t* const pcSpaces,
-                          const SHORT sOriginalXPosition,
-                          const DWORD dwFlags,
-                          _Inout_opt_ PSHORT const psScrollY)
+[[nodiscard]] NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
+                                        _In_range_(<=, pwchBuffer) const wchar_t* const pwchBufferBackupLimit,
+                                        _In_ const wchar_t* pwchBuffer,
+                                        _In_reads_bytes_(*pcb) const wchar_t* pwchRealUnicode,
+                                        _Inout_ size_t* const pcb,
+                                        _Out_opt_ size_t* const pcSpaces,
+                                        const SHORT sOriginalXPosition,
+                                        const DWORD dwFlags,
+                                        _Inout_opt_ PSHORT const psScrollY)
 {
     const CONSOLE_INFORMATION& gci = ServiceLocator::LocateGlobals().getConsoleInformation();
     TextBuffer& textBuffer = screenInfo.GetTextBuffer();
@@ -403,7 +378,7 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
         wchar_t* LocalBufPtr = LocalBuffer;
         while (*pcb < BufferSize && i < LOCAL_BUFFER_SIZE && XPosition < coordScreenBufferSize.X)
         {
-#pragma prefast(suppress:26019, "Buffer is taken in multiples of 2. Validation is ok.")
+#pragma prefast(suppress : 26019, "Buffer is taken in multiples of 2. Validation is ok.")
             const wchar_t Char = *lpString;
             const wchar_t RealUnicodeChar = *pwchRealUnicode;
             if (!IS_GLYPH_CHAR(RealUnicodeChar) || fUnprocessed)
@@ -490,7 +465,6 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
                     // if char is ctrl char, write ^char.
                     if ((dwFlags & WC_ECHO) && (IS_CONTROL_CHAR(RealUnicodeChar)))
                     {
-
                     CtrlChar:
                         if (i < (LOCAL_BUFFER_SIZE - 1))
                         {
@@ -513,26 +487,29 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
                     }
                     else
                     {
-                        // As a special favor to incompetent apps that attempt to display control chars,
-                        // convert to corresponding OEM Glyph Chars
-                        WORD CharType;
-
-                        GetStringTypeW(CT_CTYPE1, &RealUnicodeChar, 1, &CharType);
-                        if (CharType == C1_CNTRL)
-                        {
-                            ConvertOutputToUnicode(gci.OutputCP,
-                                                   (LPSTR)&RealUnicodeChar,
-                                                   1,
-                                                   LocalBufPtr,
-                                                   1);
-                        }
-                        else if (Char == UNICODE_NULL)
+                        if (Char == UNICODE_NULL)
                         {
                             *LocalBufPtr = UNICODE_SPACE;
                         }
                         else
                         {
-                            *LocalBufPtr = Char;
+                            // As a special favor to incompetent apps that attempt to display control chars,
+                            // convert to corresponding OEM Glyph Chars
+                            WORD CharType;
+
+                            GetStringTypeW(CT_CTYPE1, &RealUnicodeChar, 1, &CharType);
+                            if (WI_IsFlagSet(CharType, C1_CNTRL))
+                            {
+                                ConvertOutputToUnicode(gci.OutputCP,
+                                                       (LPSTR)&RealUnicodeChar,
+                                                       1,
+                                                       LocalBufPtr,
+                                                       1);
+                            }
+                            else
+                            {
+                                *LocalBufPtr = Char;
+                            }
                         }
 
                         LocalBufPtr++;
@@ -562,8 +539,7 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
             const auto itEnd = screenInfo.Write(it);
 
             // Notify accessibility
-            screenInfo.NotifyAccessibilityEventing(CursorPosition.X, CursorPosition.Y,
-                                                   CursorPosition.X + gsl::narrow<SHORT>(i - 1), CursorPosition.Y);
+            screenInfo.NotifyAccessibilityEventing(CursorPosition.X, CursorPosition.Y, CursorPosition.X + gsl::narrow<SHORT>(i - 1), CursorPosition.Y);
 
             // The number of "spaces" or "cells" we have consumed needs to be reported and stored for later
             // when/if we need to erase the command line.
@@ -640,14 +616,15 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
                 }
 
                 for (i = 0, Tmp2 = buffer.get(), Tmp = pwchBufferBackupLimit;
-                     i < bufferSize; i++, Tmp++)
+                     i < bufferSize;
+                     i++, Tmp++)
                 {
                     // see 18120085, these two need to be seperate if statements
                     if (*Tmp == UNICODE_BACKSPACE)
                     {
                         //it is important we do nothing in the else case for
                         //      this one instead of falling through to the below else.
-                        if(Tmp2 > buffer.get())
+                        if (Tmp2 > buffer.get())
                         {
                             Tmp2--;
                         }
@@ -664,10 +641,9 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
                 }
                 else
                 {
-#pragma prefast(suppress:26001, "This is fine. Tmp2 has to have advanced or it would equal pBuffer.")
+#pragma prefast(suppress : 26001, "This is fine. Tmp2 has to have advanced or it would equal pBuffer.")
                     LastChar = *(Tmp2 - 1);
                 }
-
 
                 if (LastChar == UNICODE_TAB)
                 {
@@ -809,7 +785,6 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
                     }
                     CATCH_LOG();
                 }
-
             }
             Status = AdjustCursorPosition(screenInfo, CursorPosition, (dwFlags & WC_KEEP_CURSOR_VISIBLE) != 0, psScrollY);
             break;
@@ -935,16 +910,15 @@ NTSTATUS WriteCharsLegacy(SCREEN_INFORMATION& screenInfo,
 // Return Value:
 // Note:
 // - This routine does not process tabs and backspace properly.  That code will be implemented as part of the line editing services.
-[[nodiscard]]
-NTSTATUS WriteChars(SCREEN_INFORMATION& screenInfo,
-                    _In_range_(<= , pwchBuffer) const wchar_t* const pwchBufferBackupLimit,
-                    _In_ const wchar_t* pwchBuffer,
-                    _In_reads_bytes_(*pcb) const wchar_t* pwchRealUnicode,
-                    _Inout_ size_t* const pcb,
-                    _Out_opt_ size_t* const pcSpaces,
-                    const SHORT sOriginalXPosition,
-                    const DWORD dwFlags,
-                    _Inout_opt_ PSHORT const psScrollY)
+[[nodiscard]] NTSTATUS WriteChars(SCREEN_INFORMATION& screenInfo,
+                                  _In_range_(<=, pwchBuffer) const wchar_t* const pwchBufferBackupLimit,
+                                  _In_ const wchar_t* pwchBuffer,
+                                  _In_reads_bytes_(*pcb) const wchar_t* pwchRealUnicode,
+                                  _Inout_ size_t* const pcb,
+                                  _Out_opt_ size_t* const pcSpaces,
+                                  const SHORT sOriginalXPosition,
+                                  const DWORD dwFlags,
+                                  _Inout_opt_ PSHORT const psScrollY)
 {
     if (!WI_IsFlagSet(screenInfo.OutputMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING) ||
         !WI_IsFlagSet(screenInfo.OutputMode, ENABLE_PROCESSED_OUTPUT))
@@ -1010,11 +984,10 @@ NTSTATUS WriteChars(SCREEN_INFORMATION& screenInfo,
 // - STATUS_SUCCESS if OK.
 // - CONSOLE_STATUS_WAIT if we couldn't finish now and need to be called back later (see ppWaiter).
 // - Or a suitable NTSTATUS format error code for memory/string/math failures.
-[[nodiscard]]
-NTSTATUS DoWriteConsole(_In_reads_bytes_(*pcbBuffer) PWCHAR pwchBuffer,
-                        _Inout_ size_t* const pcbBuffer,
-                        SCREEN_INFORMATION& screenInfo,
-                        std::unique_ptr<WriteData>& waiter)
+[[nodiscard]] NTSTATUS DoWriteConsole(_In_reads_bytes_(*pcbBuffer) PWCHAR pwchBuffer,
+                                      _Inout_ size_t* const pcbBuffer,
+                                      SCREEN_INFORMATION& screenInfo,
+                                      std::unique_ptr<WriteData>& waiter)
 {
     const CONSOLE_INFORMATION& gci = ServiceLocator::LocateGlobals().getConsoleInformation();
     if (WI_IsAnyFlagSet(gci.Flags, (CONSOLE_SUSPENDED | CONSOLE_SELECTING | CONSOLE_SCROLLBAR_TRACKING)))
@@ -1060,11 +1033,10 @@ NTSTATUS DoWriteConsole(_In_reads_bytes_(*pcbBuffer) PWCHAR pwchBuffer,
 // - S_OK if successful.
 // - S_OK if we need to wait (check if ppWaiter is not nullptr).
 // - Or a suitable HRESULT code for math/string/memory failures.
-[[nodiscard]]
-HRESULT WriteConsoleWImplHelper(IConsoleOutputObject& context,
-                                const std::wstring_view buffer,
-                                size_t& read,
-                                std::unique_ptr<WriteData>& waiter) noexcept
+[[nodiscard]] HRESULT WriteConsoleWImplHelper(IConsoleOutputObject& context,
+                                              const std::wstring_view buffer,
+                                              size_t& read,
+                                              std::unique_ptr<WriteData>& waiter) noexcept
 {
     try
     {
@@ -1106,11 +1078,10 @@ HRESULT WriteConsoleWImplHelper(IConsoleOutputObject& context,
 // - S_OK if successful.
 // - S_OK if we need to wait (check if ppWaiter is not nullptr).
 // - Or a suitable HRESULT code for math/string/memory failures.
-[[nodiscard]]
-HRESULT ApiRoutines::WriteConsoleAImpl(IConsoleOutputObject& context,
-                                       const std::string_view buffer,
-                                       size_t& read,
-                                       std::unique_ptr<IWaitRoutine>& waiter) noexcept
+[[nodiscard]] HRESULT ApiRoutines::WriteConsoleAImpl(IConsoleOutputObject& context,
+                                                     const std::string_view buffer,
+                                                     size_t& read,
+                                                     std::unique_ptr<IWaitRoutine>& waiter) noexcept
 {
     try
     {
@@ -1182,7 +1153,7 @@ HRESULT ApiRoutines::WriteConsoleAImpl(IConsoleOutputObject& context,
             unsigned int uiTextBufferLength;
             RETURN_IF_FAILED(SizeTToUInt(buffer.size(), &uiTextBufferLength));
 
-            if (!ScreenInfo.WriteConsoleDbcsLeadByte[0] || *(PUCHAR)BufPtr < (UCHAR) ' ')
+            if (!ScreenInfo.WriteConsoleDbcsLeadByte[0] || *(PUCHAR)BufPtr < (UCHAR)' ')
             {
                 dbcsNumBytes = 0;
                 BufPtrNumBytes = uiTextBufferLength;
@@ -1353,11 +1324,10 @@ HRESULT ApiRoutines::WriteConsoleAImpl(IConsoleOutputObject& context,
 // - S_OK if successful.
 // - S_OK if we need to wait (check if ppWaiter is not nullptr).
 // - Or a suitable HRESULT code for math/string/memory failures.
-[[nodiscard]]
-HRESULT ApiRoutines::WriteConsoleWImpl(IConsoleOutputObject& context,
-                                       const std::wstring_view buffer,
-                                       size_t& read,
-                                       std::unique_ptr<IWaitRoutine>& waiter) noexcept
+[[nodiscard]] HRESULT ApiRoutines::WriteConsoleWImpl(IConsoleOutputObject& context,
+                                                     const std::wstring_view buffer,
+                                                     size_t& read,
+                                                     std::unique_ptr<IWaitRoutine>& waiter) noexcept
 {
     try
     {

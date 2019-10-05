@@ -6,6 +6,7 @@
 using namespace ::Microsoft::Terminal::Core;
 using namespace ::Microsoft::Console::VirtualTerminal;
 
+// clang-format off
 const BYTE RED_ATTR     = 0x01;
 const BYTE GREEN_ATTR   = 0x02;
 const BYTE BLUE_ATTR    = 0x04;
@@ -26,6 +27,7 @@ const BYTE BRIGHT_BLUE    = BRIGHT_ATTR | BLUE_ATTR;
 const BYTE BRIGHT_MAGENTA = BRIGHT_ATTR | RED_ATTR | BLUE_ATTR;
 const BYTE BRIGHT_CYAN    = BRIGHT_ATTR | GREEN_ATTR | BLUE_ATTR;
 const BYTE BRIGHT_WHITE   = BRIGHT_ATTR | RED_ATTR | GREEN_ATTR | BLUE_ATTR;
+// clang-format on
 
 // Routine Description:
 // Returns true if the GraphicsOption represents an extended color option.
@@ -78,8 +80,8 @@ bool TerminalDispatch::s_IsDefaultColorOption(const DispatchTypes::GraphicsOptio
 //     3 - true, parsed an xterm index to a color
 //     5 - true, parsed an RGB color.
 bool TerminalDispatch::_SetRgbColorsHelper(_In_reads_(cOptions) const DispatchTypes::GraphicsOptions* const rgOptions,
-                          const size_t cOptions,
-                          _Out_ size_t* const pcOptionsConsumed)
+                                           const size_t cOptions,
+                                           _Out_ size_t* const pcOptionsConsumed)
 {
     COLORREF color = 0;
     bool isForeground = false;
@@ -101,27 +103,27 @@ bool TerminalDispatch::_SetRgbColorsHelper(_In_reads_(cOptions) const DispatchTy
             isForeground = false;
         }
 
-        if (typeOpt == DispatchTypes::GraphicsOptions::RGBColor && cOptions >= 5)
+        if (typeOpt == DispatchTypes::GraphicsOptions::RGBColorOrFaint && cOptions >= 5)
         {
             *pcOptionsConsumed = 5;
             // ensure that each value fits in a byte
-            unsigned int red = rgOptions[2] > 255? 255 : rgOptions[2];
-            unsigned int green = rgOptions[3] > 255? 255 : rgOptions[3];
-            unsigned int blue = rgOptions[4] > 255? 255 : rgOptions[4];
+            unsigned int red = rgOptions[2] > 255 ? 255 : rgOptions[2];
+            unsigned int green = rgOptions[3] > 255 ? 255 : rgOptions[3];
+            unsigned int blue = rgOptions[4] > 255 ? 255 : rgOptions[4];
 
             color = RGB(red, green, blue);
 
             fSuccess = _terminalApi.SetTextRgbColor(color, isForeground);
         }
-        else if (typeOpt == DispatchTypes::GraphicsOptions::Xterm256Index && cOptions >= 3)
+        else if (typeOpt == DispatchTypes::GraphicsOptions::BlinkOrXterm256Index && cOptions >= 3)
         {
             *pcOptionsConsumed = 3;
             if (rgOptions[2] <= 255) // ensure that the provided index is on the table
             {
                 unsigned int tableIndex = rgOptions[2];
                 fSuccess = isForeground ?
-                                _terminalApi.SetTextForegroundIndex((BYTE)tableIndex) :
-                                _terminalApi.SetTextBackgroundIndex((BYTE)tableIndex);
+                               _terminalApi.SetTextForegroundIndex((BYTE)tableIndex) :
+                               _terminalApi.SetTextBackgroundIndex((BYTE)tableIndex);
             }
         }
     }
@@ -307,7 +309,7 @@ bool TerminalDispatch::SetGraphicsRendition(const DispatchTypes::GraphicsOptions
             size_t cOptionsConsumed = 0;
 
             // _SetRgbColorsHelper will call the appropriate ConApi function
-            fSuccess = _SetRgbColorsHelper(&(rgOptions[i]), cOptions-i, &cOptionsConsumed);
+            fSuccess = _SetRgbColorsHelper(&(rgOptions[i]), cOptions - i, &cOptionsConsumed);
 
             i += (cOptionsConsumed - 1); // cOptionsConsumed includes the opt we're currently on.
         }

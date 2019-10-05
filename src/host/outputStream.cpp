@@ -12,7 +12,9 @@
 #include "../interactivity/inc/ServiceLocator.hpp"
 
 #pragma hdrstop
+
 using namespace Microsoft::Console;
+using Microsoft::Console::Interactivity::ServiceLocator;
 
 WriteBuffer::WriteBuffer(_In_ Microsoft::Console::IIoProvider& io) :
     _io{ io },
@@ -91,7 +93,6 @@ ConhostInternalGetSet::ConhostInternalGetSet(_In_ IIoProvider& io) :
     _io{ io }
 {
 }
-
 
 // Routine Description:
 // - Connects the GetConsoleScreenBufferInfoEx API call directly into our Driver Message servicing call inside Conhost.exe
@@ -269,6 +270,32 @@ BOOL ConhostInternalGetSet::SetConsoleRGBTextAttribute(const COLORREF rgbColor, 
 BOOL ConhostInternalGetSet::PrivateBoldText(const bool bolded)
 {
     DoSrvPrivateBoldText(_io.GetActiveOutputBuffer(), bolded);
+    return TRUE;
+}
+
+// Method Description:
+// - Retrieves the currently active ExtendedAttributes. See also
+//   DoSrvPrivateGetExtendedTextAttributes
+// Arguments:
+// - pAttrs: Recieves the ExtendedAttributes value.
+// Return Value:
+// - TRUE if successful (see DoSrvPrivateGetExtendedTextAttributes). FALSE otherwise.
+BOOL ConhostInternalGetSet::PrivateGetExtendedTextAttributes(ExtendedAttributes* const pAttrs)
+{
+    *pAttrs = DoSrvPrivateGetExtendedTextAttributes(_io.GetActiveOutputBuffer());
+    return TRUE;
+}
+
+// Method Description:
+// - Sets the active ExtendedAttributes of the active screen buffer. Text
+//   written to this buffer will be written with these attributes.
+// Arguments:
+// - extendedAttrs: The new ExtendedAttributes to use
+// Return Value:
+// - TRUE if successful (see DoSrvPrivateSetExtendedTextAttributes). FALSE otherwise.
+BOOL ConhostInternalGetSet::PrivateSetExtendedTextAttributes(const ExtendedAttributes attrs)
+{
+    DoSrvPrivateSetExtendedTextAttributes(_io.GetActiveOutputBuffer(), attrs);
     return TRUE;
 }
 
@@ -760,4 +787,28 @@ BOOL ConhostInternalGetSet::MoveToBottom() const
 BOOL ConhostInternalGetSet::PrivateSetColorTableEntry(const short index, const COLORREF value) const noexcept
 {
     return SUCCEEDED(DoSrvPrivateSetColorTableEntry(index, value));
+}
+
+// Method Description:
+// - Connects the PrivateSetDefaultForeground call directly into our Driver Message servicing
+//      call inside Conhost.exe
+// Arguments:
+// - value: the new RGB value to use, as a COLORREF, format 0x00BBGGRR.
+// Return Value:
+// - TRUE if successful (see DoSrvPrivateSetDefaultForegroundColor). FALSE otherwise.
+BOOL ConhostInternalGetSet::PrivateSetDefaultForeground(const COLORREF value) const noexcept
+{
+    return SUCCEEDED(DoSrvPrivateSetDefaultForegroundColor(value));
+}
+
+// Method Description:
+// - Connects the PrivateSetDefaultBackground call directly into our Driver Message servicing
+//      call inside Conhost.exe
+// Arguments:
+// - value: the new RGB value to use, as a COLORREF, format 0x00BBGGRR.
+// Return Value:
+// - TRUE if successful (see DoSrvPrivateSetDefaultBackgroundColor). FALSE otherwise.
+BOOL ConhostInternalGetSet::PrivateSetDefaultBackground(const COLORREF value) const noexcept
+{
+    return SUCCEEDED(DoSrvPrivateSetDefaultBackgroundColor(value));
 }

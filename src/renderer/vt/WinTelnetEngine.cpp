@@ -10,15 +10,15 @@ using namespace Microsoft::Console::Render;
 using namespace Microsoft::Console::Types;
 
 WinTelnetEngine::WinTelnetEngine(_In_ wil::unique_hfile hPipe,
+                                 wil::shared_event shutdownEvent,
                                  const IDefaultColorProvider& colorProvider,
                                  const Viewport initialViewport,
                                  _In_reads_(cColorTable) const COLORREF* const ColorTable,
                                  const WORD cColorTable) :
-    VtEngine(std::move(hPipe), colorProvider, initialViewport),
+    VtEngine(std::move(hPipe), shutdownEvent, colorProvider, initialViewport),
     _ColorTable(ColorTable),
     _cColorTable(cColorTable)
 {
-
 }
 
 // Routine Description:
@@ -29,18 +29,22 @@ WinTelnetEngine::WinTelnetEngine(_In_ wil::unique_hfile hPipe,
 // - colorBackground: The RGB Color to use to paint the background of the text.
 // - legacyColorAttribute: A console attributes bit field specifying the brush
 //      colors we should use.
+// - extendedAttrs - extended text attributes (italic, underline, etc.) to use.
 // - isSettingDefaultBrushes: indicates if we should change the background color of
 //      the window. Unused for VT
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT WinTelnetEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
-                                              const COLORREF colorBackground,
-                                              const WORD /*legacyColorAttribute*/,
-                                              const bool isBold,
-                                              const bool /*isSettingDefaultBrushes*/) noexcept
+[[nodiscard]] HRESULT WinTelnetEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
+                                                            const COLORREF colorBackground,
+                                                            const WORD /*legacyColorAttribute*/,
+                                                            const ExtendedAttributes extendedAttrs,
+                                                            const bool /*isSettingDefaultBrushes*/) noexcept
 {
-    return VtEngine::_16ColorUpdateDrawingBrushes(colorForeground, colorBackground, isBold, _ColorTable, _cColorTable);
+    return VtEngine::_16ColorUpdateDrawingBrushes(colorForeground,
+                                                  colorBackground,
+                                                  WI_IsFlagSet(extendedAttrs, ExtendedAttributes::Bold),
+                                                  _ColorTable,
+                                                  _cColorTable);
 }
 
 // Routine Description:
@@ -50,8 +54,7 @@ HRESULT WinTelnetEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
 // - coord: location to move the cursor to.
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT WinTelnetEngine::_MoveCursor(COORD const coord) noexcept
+[[nodiscard]] HRESULT WinTelnetEngine::_MoveCursor(COORD const coord) noexcept
 {
     HRESULT hr = S_OK;
     // don't try and be clever about moving the cursor.
@@ -77,8 +80,7 @@ HRESULT WinTelnetEngine::_MoveCursor(COORD const coord) noexcept
 // - <none>
 // Return Value:
 // - S_OK
-[[nodiscard]]
-HRESULT WinTelnetEngine::ScrollFrame() noexcept
+[[nodiscard]] HRESULT WinTelnetEngine::ScrollFrame() noexcept
 {
     // win-telnet doesn't know anything about scroll vt sequences
     // every frame, we're repainitng everything, always.
@@ -93,8 +95,7 @@ HRESULT WinTelnetEngine::ScrollFrame() noexcept
 //      console would like us to move while scrolling.
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT WinTelnetEngine::InvalidateScroll(const COORD* const /*pcoordDelta*/) noexcept
+[[nodiscard]] HRESULT WinTelnetEngine::InvalidateScroll(const COORD* const /*pcoordDelta*/) noexcept
 {
     // win-telnet assumes the client doesn't know anything about inserting or
     //  deleting lines.
@@ -109,8 +110,7 @@ HRESULT WinTelnetEngine::InvalidateScroll(const COORD* const /*pcoordDelta*/) no
 // - wstr - wstring of text to be written
 // Return Value:
 // - S_OK or suitable HRESULT error from either conversion or writing pipe.
-[[nodiscard]]
-HRESULT WinTelnetEngine::WriteTerminalW(_In_ const std::wstring& wstr) noexcept
+[[nodiscard]] HRESULT WinTelnetEngine::WriteTerminalW(_In_ const std::wstring& wstr) noexcept
 {
     return VtEngine::_WriteTerminalAscii(wstr);
 }

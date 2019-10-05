@@ -15,7 +15,6 @@ Author(s):
 
 #pragma once
 
-
 #include "..\..\types\inc\IInputEvent.hpp"
 #include "..\..\inc\conattrs.hpp"
 
@@ -53,6 +52,8 @@ namespace Microsoft::Console::VirtualTerminal
                                                   const bool fIsForeground) = 0;
         virtual BOOL SetConsoleRGBTextAttribute(const COLORREF rgbColor, const bool fIsForeground) = 0;
         virtual BOOL PrivateBoldText(const bool bolded) = 0;
+        virtual BOOL PrivateGetExtendedTextAttributes(ExtendedAttributes* const pAttrs) = 0;
+        virtual BOOL PrivateSetExtendedTextAttributes(const ExtendedAttributes attrs) = 0;
 
         virtual BOOL PrivateWriteConsoleInputW(_Inout_ std::deque<std::unique_ptr<IInputEvent>>& events,
                                                _Out_ size_t& eventsWritten) = 0;
@@ -107,6 +108,7 @@ namespace Microsoft::Console::VirtualTerminal
         virtual BOOL MoveToBottom() const = 0;
 
         virtual BOOL PrivateSetColorTableEntry(const short index, const COLORREF value) const = 0;
-
+        virtual BOOL PrivateSetDefaultForeground(const COLORREF value) const = 0;
+        virtual BOOL PrivateSetDefaultBackground(const COLORREF value) const = 0;
     };
 }

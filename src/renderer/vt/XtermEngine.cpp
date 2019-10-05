@@ -10,18 +10,21 @@ using namespace Microsoft::Console::Render;
 using namespace Microsoft::Console::Types;
 
 XtermEngine::XtermEngine(_In_ wil::unique_hfile hPipe,
+                         wil::shared_event shutdownEvent,
                          const IDefaultColorProvider& colorProvider,
                          const Viewport initialViewport,
                          _In_reads_(cColorTable) const COLORREF* const ColorTable,
                          const WORD cColorTable,
                          const bool fUseAsciiOnly) :
-    VtEngine(std::move(hPipe), colorProvider, initialViewport),
+    VtEngine(std::move(hPipe), shutdownEvent, colorProvider, initialViewport),
     _ColorTable(ColorTable),
     _cColorTable(cColorTable),
     _fUseAsciiOnly(fUseAsciiOnly),
     _previousLineWrapped(false),
     _usingUnderLine(false),
-    _needToDisableCursor(false)
+    _needToDisableCursor(false),
+    _lastCursorIsVisible(false),
+    _nextCursorIsVisible(true)
 {
     // Set out initial cursor position to -1, -1. This will force our initial
     //      paint to manually move the cursor to 0, 0, not just ignore it.
@@ -38,12 +41,16 @@ XtermEngine::XtermEngine(_In_ wil::unique_hfile hPipe,
 // - S_OK if we started to paint. S_FALSE if we didn't need to paint. HRESULT
 //      error code if painting didn't start successfully, or we failed to write
 //      the pipe.
-[[nodiscard]]
-HRESULT XtermEngine::StartPaint() noexcept
+[[nodiscard]] HRESULT XtermEngine::StartPaint() noexcept
 {
     RETURN_IF_FAILED(VtEngine::StartPaint());
 
     _trace.TraceLastText(_lastText);
+
+    // Prep us to think that the cursor is not visible this frame. If it _is_
+    // visible, then PaintCursor will be called, and we'll set this to true
+    // during the frame.
+    _nextCursorIsVisible = false;
 
     if (_firstPaint)
     {
@@ -73,14 +80,7 @@ HRESULT XtermEngine::StartPaint() noexcept
 
     if (!_quickReturn)
     {
-        if (!_WillWriteSingleChar())
-        {
-            // MSFT:TODO:20331739
-            // Make sure to match the cursor visibility in the terminal to the console's
-            // // Turn off cursor
-            // RETURN_IF_FAILED(_HideCursor());
-        }
-        else
+        if (_WillWriteSingleChar())
         {
             // Don't re-enable the cursor.
             _quickReturn = true;
@@ -97,26 +97,40 @@ HRESULT XtermEngine::StartPaint() noexcept
 // - <none>
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT XtermEngine::EndPaint() noexcept
+[[nodiscard]] HRESULT XtermEngine::EndPaint() noexcept
 {
-
-    // MSFT:TODO:20331739
-    // Make sure to match the cursor visibility in the terminal to the console's
-    // if (!_quickReturn)
-    // {
-    //     // Turn on cursor
-    //     RETURN_IF_FAILED(_ShowCursor());
-    // }
-
     // If during the frame we determined that the cursor needed to be disabled,
     //      then insert a cursor off at the start of the buffer, and re-enable
     //      the cursor here.
     if (_needToDisableCursor)
     {
-        _buffer.insert(0, "\x1b[25l");
+        // If the cursor was previously visible, let's hide it for this frame,
+        // by prepending a cursor off.
+        if (_lastCursorIsVisible)
+        {
+            _buffer.insert(0, "\x1b[25l");
+            _lastCursorIsVisible = false;
+        }
+        // If the cursor was NOT previously visible, then that's fine! we don't
+        // need to worry, it's already off.
+    }
+
+    // If the cursor is moving from off -> on (including cases where we just
+    // disabled if for this frame), show the cursor at the end of the frame
+    if (_nextCursorIsVisible && !_lastCursorIsVisible)
+    {
         RETURN_IF_FAILED(_ShowCursor());
     }
+    // Otherwise, if the cursor previously was visible, and it should be hidden
+    // (on -> off), hide it at the end of the frame.
+    else if (!_nextCursorIsVisible && _lastCursorIsVisible)
+    {
+        RETURN_IF_FAILED(_HideCursor());
+    }
+
+    // Update our tracker of what we thought the last cursor state of the
+    // terminal was.
+    _lastCursorIsVisible = _nextCursorIsVisible;
 
     RETURN_IF_FAILED(VtEngine::EndPaint());
 
@@ -125,7 +139,6 @@ HRESULT XtermEngine::EndPaint() noexcept
     return S_OK;
 }
 
-
 // Routine Description:
 // - Write a VT sequence to either start or stop underlining text.
 // Arguments:
@@ -133,8 +146,7 @@ HRESULT XtermEngine::EndPaint() noexcept
 //      about the underlining state of the text.
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT XtermEngine::_UpdateUnderline(const WORD legacyColorAttribute) noexcept
+[[nodiscard]] HRESULT XtermEngine::_UpdateUnderline(const WORD legacyColorAttribute) noexcept
 {
     bool textUnderlined = WI_IsFlagSet(legacyColorAttribute, COMMON_LVB_UNDERSCORE);
     if (textUnderlined != _usingUnderLine)
@@ -160,16 +172,16 @@ HRESULT XtermEngine::_UpdateUnderline(const WORD legacyColorAttribute) noexcept
 // - colorBackground: The RGB Color to use to paint the background of the text.
 // - legacyColorAttribute: A console attributes bit field specifying the brush
 //      colors we should use.
+// - extendedAttrs - extended text attributes (italic, underline, etc.) to use.
 // - isSettingDefaultBrushes: indicates if we should change the background color of
 //      the window. Unused for VT
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT XtermEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
-                                          const COLORREF colorBackground,
-                                          const WORD legacyColorAttribute,
-                                          const bool isBold,
-                                          const bool /*isSettingDefaultBrushes*/) noexcept
+[[nodiscard]] HRESULT XtermEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
+                                                        const COLORREF colorBackground,
+                                                        const WORD legacyColorAttribute,
+                                                        const ExtendedAttributes extendedAttrs,
+                                                        const bool /*isSettingDefaultBrushes*/) noexcept
 {
     //When we update the brushes, check the wAttrs to see if the LVB_UNDERSCORE
     //      flag is there. If the state of that flag is different then our
@@ -177,10 +189,35 @@ HRESULT XtermEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
     // We have to do this here, instead of in PaintBufferGridLines, because
     //      we'll have already painted the text by the time PaintBufferGridLines
     //      is called.
-
+    // TODO:GH#2915 Treat underline separately from LVB_UNDERSCORE
     RETURN_IF_FAILED(_UpdateUnderline(legacyColorAttribute));
     // The base xterm mode only knows about 16 colors
-    return VtEngine::_16ColorUpdateDrawingBrushes(colorForeground, colorBackground, isBold, _ColorTable, _cColorTable);
+    return VtEngine::_16ColorUpdateDrawingBrushes(colorForeground,
+                                                  colorBackground,
+                                                  WI_IsFlagSet(extendedAttrs, ExtendedAttributes::Bold),
+                                                  _ColorTable,
+                                                  _cColorTable);
+}
+
+// Routine Description:
+// - Draws the cursor on the screen
+// Arguments:
+// - options - Options that affect the presentation of the cursor
+// Return Value:
+// - S_OK or suitable HRESULT error from writing pipe.
+[[nodiscard]] HRESULT XtermEngine::PaintCursor(const IRenderEngine::CursorOptions& options) noexcept
+{
+    // PaintCursor is only called when the cursor is in fact visible in a single
+    // frame. When this is called, mark _nextCursorIsVisible as true. At the end
+    // of the frame, we'll decide to either turn the cursor on or not, based
+    // upon the previous state.
+
+    // When this method is not called during a frame, it's because the cursor
+    // was not visible. In that case, at the end of the frame,
+    // _nextCursorIsVisible will still be false (from when we set it during
+    // StartPaint)
+    _nextCursorIsVisible = true;
+    return VtEngine::PaintCursor(options);
 }
 
 // Routine Description:
@@ -195,8 +232,7 @@ HRESULT XtermEngine::UpdateDrawingBrushes(const COLORREF colorForeground,
 // - coord: location to move the cursor to.
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT XtermEngine::_MoveCursor(COORD const coord) noexcept
+[[nodiscard]] HRESULT XtermEngine::_MoveCursor(COORD const coord) noexcept
 {
     HRESULT hr = S_OK;
 
@@ -207,7 +243,7 @@ HRESULT XtermEngine::_MoveCursor(COORD const coord) noexcept
             _needToDisableCursor = true;
             hr = _CursorHome();
         }
-        else if (coord.X == 0 && coord.Y == (_lastText.Y+1))
+        else if (coord.X == 0 && coord.Y == (_lastText.Y + 1))
         {
             // Down one line, at the start of the line.
 
@@ -229,13 +265,13 @@ HRESULT XtermEngine::_MoveCursor(COORD const coord) noexcept
             std::string seq = "\r";
             hr = _Write(seq);
         }
-        else if (coord.X == _lastText.X && coord.Y == (_lastText.Y+1))
+        else if (coord.X == _lastText.X && coord.Y == (_lastText.Y + 1))
         {
             // Down one line, same X position
             std::string seq = "\n";
             hr = _Write(seq);
         }
-        else if (coord.X == (_lastText.X-1) && coord.Y == (_lastText.Y))
+        else if (coord.X == (_lastText.X - 1) && coord.Y == (_lastText.Y))
         {
             // Back one char, same Y position
             std::string seq = "\b";
@@ -277,8 +313,7 @@ HRESULT XtermEngine::_MoveCursor(COORD const coord) noexcept
 // - <none>
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for failing to allocate or write.
-[[nodiscard]]
-HRESULT XtermEngine::ScrollFrame() noexcept
+[[nodiscard]] HRESULT XtermEngine::ScrollFrame() noexcept
 {
     if (_scrollDelta.X != 0)
     {
@@ -302,7 +337,7 @@ HRESULT XtermEngine::ScrollFrame() noexcept
         //      That will cause everything to move up, by moving the viewport down.
         // This will let remote conhosts scroll up to see history like normal.
         const short bottom = _lastViewport.ToOrigin().BottomInclusive();
-        hr = _MoveCursor({0, bottom});
+        hr = _MoveCursor({ 0, bottom });
         if (SUCCEEDED(hr))
         {
             std::string seq = std::string(absDy, '\n');
@@ -318,7 +353,7 @@ HRESULT XtermEngine::ScrollFrame() noexcept
     {
         // Move to the top of the buffer, and insert some lines of text, to
         //      cause the viewport contents to shift down.
-        hr = _MoveCursor({0, 0});
+        hr = _MoveCursor({ 0, 0 });
         if (SUCCEEDED(hr))
         {
             hr = _InsertLine(absDy);
@@ -337,8 +372,7 @@ HRESULT XtermEngine::ScrollFrame() noexcept
 //      console would like us to move while scrolling.
 // Return Value:
 // - S_OK if we succeeded, else an appropriate HRESULT for safemath failure
-[[nodiscard]]
-HRESULT XtermEngine::InvalidateScroll(const COORD* const pcoordDelta) noexcept
+[[nodiscard]] HRESULT XtermEngine::InvalidateScroll(const COORD* const pcoordDelta) noexcept
 {
     const short dx = pcoordDelta->X;
     const short dy = pcoordDelta->Y;
@@ -367,7 +401,6 @@ HRESULT XtermEngine::InvalidateScroll(const COORD* const pcoordDelta) noexcept
 
         // Store if safemath succeeded
         _scrollDelta = invalidScrollNew;
-
     }
 
     return S_OK;
@@ -385,14 +418,13 @@ HRESULT XtermEngine::InvalidateScroll(const COORD* const pcoordDelta) noexcept
 //      double-wide character.
 // Return Value:
 // - S_OK or suitable HRESULT error from writing pipe.
-[[nodiscard]]
-HRESULT XtermEngine::PaintBufferLine(std::basic_string_view<Cluster> const clusters,
-                                     const COORD coord,
-                                     const bool /*trimLeft*/) noexcept
+[[nodiscard]] HRESULT XtermEngine::PaintBufferLine(std::basic_string_view<Cluster> const clusters,
+                                                   const COORD coord,
+                                                   const bool /*trimLeft*/) noexcept
 {
     return _fUseAsciiOnly ?
-        VtEngine::_PaintAsciiBufferLine(clusters, coord) :
-        VtEngine::_PaintUtf8BufferLine(clusters, coord);
+               VtEngine::_PaintAsciiBufferLine(clusters, coord) :
+               VtEngine::_PaintUtf8BufferLine(clusters, coord);
 }
 
 // Method Description:
@@ -402,12 +434,11 @@ HRESULT XtermEngine::PaintBufferLine(std::basic_string_view<Cluster> const clust
 // - wstr - wstring of text to be written
 // Return Value:
 // - S_OK or suitable HRESULT error from either conversion or writing pipe.
-[[nodiscard]]
-HRESULT XtermEngine::WriteTerminalW(const std::wstring& wstr) noexcept
+[[nodiscard]] HRESULT XtermEngine::WriteTerminalW(const std::wstring& wstr) noexcept
 {
     return _fUseAsciiOnly ?
-        VtEngine::_WriteTerminalAscii(wstr) :
-        VtEngine::_WriteTerminalUtf8(wstr);
+               VtEngine::_WriteTerminalAscii(wstr) :
+               VtEngine::_WriteTerminalUtf8(wstr);
 }
 
 // Method Description:
@@ -416,10 +447,9 @@ HRESULT XtermEngine::WriteTerminalW(const std::wstring& wstr) noexcept
 // - newTitle: the new string to use for the title of the window
 // Return Value:
 // - S_OK
-[[nodiscard]]
-HRESULT XtermEngine::_DoUpdateTitle(const std::wstring& newTitle) noexcept
+[[nodiscard]] HRESULT XtermEngine::_DoUpdateTitle(const std::wstring& newTitle) noexcept
 {
-    // inbox telnet uses xterm-ascii as it's mode. If we're in ascii mode, don't
+    // inbox telnet uses xterm-ascii as its mode. If we're in ascii mode, don't
     //      do anything, to maintain compatibility.
     if (_fUseAsciiOnly)
     {
